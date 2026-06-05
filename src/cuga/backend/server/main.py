@@ -6,6 +6,7 @@ import platform
 import re
 import shutil
 import os
+import secrets
 import subprocess
 import uuid
 import yaml
@@ -15,7 +16,7 @@ from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Union, Optional
 from pathlib import Path
 import traceback
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from fastapi import Depends, FastAPI, Request, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -252,6 +253,7 @@ class AppState:
         self.current_llm: Optional[Any] = None
         self.background_tasks: List[asyncio.Task] = []
         self.subsystem_statuses: Dict[str, Dict[str, Any]] = {}
+        self.event_idempotency_keys: set[str] = set()
         self.initialize_sdk()
 
     def set_subsystem_status(
@@ -320,6 +322,16 @@ draft_app_state = DraftAppState()
 class ChatRequest(BaseModel):
     messages: List[Dict[str, Any]]
     stream: bool = False
+
+
+class CugaEvent(BaseModel):
+    source: str = Field(..., min_length=1)
+    subscription_id: str = Field(..., min_length=1)
+    event_type: str = Field(..., min_length=1)
+    idempotency_key: str = Field(..., min_length=1)
+    target_agent: str = Field(default="cuga-default", min_length=1)
+    thread_key: str = Field(..., min_length=1)
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AttachmentSnapshotItem(BaseModel):
@@ -2028,6 +2040,104 @@ async def stream(
             user_attachments=user_attachments,
         ),
         media_type="text/event-stream",
+    )
+
+
+def _require_events_token(request: Request) -> None:
+    expected = (os.environ.get("CUGA_EVENTS_TOKEN") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="CUGA_EVENTS_TOKEN is not configured")
+
+    raw = request.headers.get("authorization") or ""
+    scheme, _, token = raw.partition(" ")
+    if scheme.lower() != "bearer" or not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid CUGA event token")
+
+
+def _event_dispatch_enabled() -> bool:
+    return str(os.environ.get("CUGA_EVENTS_DISPATCH", "true")).lower() in ("1", "true", "yes", "on")
+
+
+def _event_to_query(event: CugaEvent) -> str:
+    payload = json.dumps(event.payload, indent=2, sort_keys=True)
+    return (
+        "Handle this external event for CUGA.\n\n"
+        f"source: {event.source}\n"
+        f"subscription_id: {event.subscription_id}\n"
+        f"event_type: {event.event_type}\n"
+        f"target_agent: {event.target_agent}\n"
+        f"thread_key: {event.thread_key}\n"
+        f"idempotency_key: {event.idempotency_key}\n\n"
+        f"payload:\n{payload}"
+    )
+
+
+async def _dispatch_cuga_event(event: CugaEvent, *, disable_history: bool = False) -> None:
+    query = _event_to_query(event)
+    try:
+        async for _chunk in event_stream(
+            query,
+            api_mode=True,
+            thread_id=event.thread_key,
+            disable_history=disable_history,
+            user_id=f"event:{event.source}",
+        ):
+            pass
+        logger.info("CUGA event dispatch completed: {}", event.idempotency_key)
+    except Exception as e:
+        logger.exception("CUGA event dispatch failed for {}: {}", event.idempotency_key, e)
+
+
+@app.post("/events")
+async def receive_event(request: Request, event: CugaEvent):
+    """Ingress endpoint for normalized external events from Kestra or similar automation layers."""
+    _require_events_token(request)
+
+    if event.idempotency_key in app_state.event_idempotency_keys:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "duplicate": True,
+                "idempotency_key": event.idempotency_key,
+                "thread_id": event.thread_key,
+            },
+        )
+
+    app_state.event_idempotency_keys.add(event.idempotency_key)
+    dispatch_enabled = _event_dispatch_enabled()
+    if dispatch_enabled and (not app_state.agent or not app_state.agent.graph):
+        app_state.event_idempotency_keys.discard(event.idempotency_key)
+        raise HTTPException(status_code=503, detail="CUGA agent is not available")
+
+    if dispatch_enabled:
+        task = asyncio.create_task(_dispatch_cuga_event(event))
+        app_state.background_tasks.append(task)
+        logger.info(
+            "Accepted CUGA event from {} subscription={} type={} thread={}",
+            event.source,
+            event.subscription_id,
+            event.event_type,
+            event.thread_key,
+        )
+    else:
+        logger.info(
+            "Accepted CUGA event without dispatch from {} subscription={} type={} thread={}",
+            event.source,
+            event.subscription_id,
+            event.event_type,
+            event.thread_key,
+        )
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "duplicate": False,
+            "dispatched": dispatch_enabled,
+            "idempotency_key": event.idempotency_key,
+            "thread_id": event.thread_key,
+        },
     )
 
 

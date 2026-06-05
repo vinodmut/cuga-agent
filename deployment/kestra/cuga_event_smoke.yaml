@@ -1,0 +1,28 @@
+id: cuga_event_smoke
+namespace: cuga.smoke
+
+description: "Smoke test: Kestra posts one normalized event into CUGA."
+
+tasks:
+  - id: invoke_cuga
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ secret('CUGA_EVENTS_URL') }}"
+    method: POST
+    contentType: application/json
+    headers:
+      Authorization: "Bearer {{ secret('CUGA_EVENTS_TOKEN') }}"
+    body: |
+      {
+        "source": "kestra",
+        "subscription_id": "sub_smoke_kestra_to_cuga",
+        "event_type": "slack.message.posted",
+        "idempotency_key": "kestra:cuga_event_smoke:{{ execution.id }}",
+        "target_agent": "cuga-default",
+        "thread_key": "slack:T_SMOKE:C_SMOKE:{{ execution.id }}",
+        "payload": {
+          "team": "T_SMOKE",
+          "channel": "C_SMOKE",
+          "user": "U_SMOKE",
+          "text": "Smoke test message from Kestra to CUGA"
+        }
+      }
