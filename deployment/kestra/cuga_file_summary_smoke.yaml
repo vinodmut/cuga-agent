@@ -1,0 +1,75 @@
+id: cuga_file_summary_smoke
+namespace: cuga.smoke
+
+description: "Smoke test: Kestra polls for a new transcript file, CUGA summarizes it, Kestra writes a summary file."
+
+tasks:
+  - id: summarize_and_write
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    commands:
+      - |
+        python3 - <<'PY'
+        import json
+        import pathlib
+        import urllib.error
+        import urllib.request
+
+        inbox = pathlib.Path("__TRANSCRIPT_INBOX_DIR__")
+        candidates = sorted(inbox.glob("*.txt"), key=lambda path: path.stat().st_mtime)
+        if not candidates:
+            print(json.dumps({"status": "no_transcripts"}))
+            raise SystemExit(0)
+
+        transcript = candidates[0]
+        transcript_text = transcript.read_text(encoding="utf-8")
+        payload = {
+            "source": "kestra",
+            "subscription_id": "sub_smoke_file_to_cuga_summary",
+            "event_type": "file.meeting_transcript.created",
+            "idempotency_key": "kestra:cuga_file_summary_smoke:{{ execution.id }}:" + transcript.name,
+            "target_agent": "cuga-default",
+            "thread_key": "file-summary:{{ execution.id }}:" + transcript.stem,
+            "payload": {
+                "transcript_filename": transcript.name,
+                "transcript_path": str(transcript),
+                "transcript_text": transcript_text,
+            },
+        }
+
+        request = urllib.request.Request(
+            "__CUGA_MEETING_SUMMARY_URL__",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer __CUGA_EVENTS_TOKEN__",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"CUGA summary request failed: {exc.code} {body}") from exc
+
+        response_payload = json.loads(body)
+        summary = response_payload.get("summary")
+        if not summary:
+            raise RuntimeError(f"CUGA response did not include a summary: {response_payload}")
+
+        outbox = pathlib.Path("__SUMMARY_OUTPUT_DIR__")
+        outbox.mkdir(parents=True, exist_ok=True)
+        summary_path = outbox / f"{transcript.stem}.summary.md"
+        summary_path.write_text(summary.rstrip() + "\n", encoding="utf-8")
+        processed = pathlib.Path("__PROCESSED_TRANSCRIPT_DIR__")
+        processed.mkdir(parents=True, exist_ok=True)
+        transcript.rename(processed / transcript.name)
+        print(json.dumps({"summary_path": str(summary_path)}))
+        PY
+
+triggers:
+  - id: poll_transcripts
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/1 * * * *"

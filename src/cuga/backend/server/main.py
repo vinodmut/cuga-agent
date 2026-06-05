@@ -334,6 +334,15 @@ class CugaEvent(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CugaMeetingSummaryResponse(BaseModel):
+    status: str
+    duplicate: bool = False
+    dispatched: bool = False
+    idempotency_key: str
+    thread_id: str
+    summary: str
+
+
 class AttachmentSnapshotItem(BaseModel):
     knowledge_filename: str
     display_name: str
@@ -2072,6 +2081,159 @@ def _event_to_query(event: CugaEvent) -> str:
     )
 
 
+def _meeting_transcript_from_event(event: CugaEvent) -> tuple[str, str]:
+    transcript = (
+        event.payload.get("transcript")
+        or event.payload.get("transcript_text")
+        or event.payload.get("text")
+        or ""
+    )
+    if not isinstance(transcript, str) or not transcript.strip():
+        raise HTTPException(status_code=422, detail="payload.transcript_text is required")
+
+    filename = (
+        event.payload.get("transcript_filename")
+        or event.payload.get("filename")
+        or event.payload.get("path")
+        or "meeting-transcript.txt"
+    )
+    if not isinstance(filename, str) or not filename.strip():
+        filename = "meeting-transcript.txt"
+
+    return filename, transcript.strip()
+
+
+def _meeting_lines(transcript: str) -> list[str]:
+    return [line.strip(" \t-") for line in transcript.splitlines() if line.strip(" \t-")]
+
+
+def _pick_lines(lines: list[str], keywords: tuple[str, ...], limit: int = 5) -> list[str]:
+    picked: list[str] = []
+    for line in lines:
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in keywords):
+            picked.append(line)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _summarize_transcript_for_smoke(filename: str, transcript: str) -> str:
+    lines = _meeting_lines(transcript)
+    attendee_line = next(
+        (line for line in lines if line.lower().startswith(("attendees:", "participants:"))),
+        "",
+    )
+    agenda_line = next((line for line in lines if line.lower().startswith(("agenda:", "topic:"))), "")
+    decisions = _pick_lines(lines, ("decision", "decided", "agreed", "approved", "resolved"), limit=5)
+    actions = _pick_lines(lines, ("action", "todo", "follow up", "follow-up", "owner", "due "), limit=5)
+
+    content_lines = [
+        line
+        for line in lines
+        if line != attendee_line
+        and line != agenda_line
+        and line not in decisions
+        and line not in actions
+        and not line.lower().startswith(("meeting:", "date:"))
+    ]
+    key_points = content_lines[:5]
+    if not key_points:
+        key_points = _pick_lines(lines, ("confirmed", "noted", "reported", "discussed", "reviewed"), limit=5)
+
+    def bullets(items: list[str], fallback: str) -> str:
+        if not items:
+            return f"- {fallback}"
+        return "\n".join(f"- {item}" for item in items)
+
+    sections = [
+        "# Meeting Summary",
+        "",
+        f"Source: {filename}",
+        "",
+        "## Overview",
+        (
+            f"This transcript covers {agenda_line.split(':', 1)[1].strip()}."
+            if ":" in agenda_line
+            else "This transcript was summarized from the file-triggered CUGA event."
+        ),
+    ]
+    if attendee_line:
+        sections.extend(["", "## Attendees", attendee_line.split(":", 1)[1].strip() if ":" in attendee_line else attendee_line])
+
+    sections.extend(
+        [
+            "",
+            "## Key Points",
+            bullets(key_points, "No explicit discussion points were found in the transcript."),
+            "",
+            "## Decisions",
+            bullets(decisions, "No explicit decisions were found in the transcript."),
+            "",
+            "## Action Items",
+            bullets(actions, "No explicit action items were found in the transcript."),
+        ]
+    )
+    return "\n".join(sections)
+
+
+def _event_to_meeting_summary_query(event: CugaEvent, filename: str, transcript: str) -> str:
+    return (
+        "Summarize this meeting transcript for an automation workflow.\n\n"
+        "Return concise markdown with these sections exactly:\n"
+        "- Overview\n"
+        "- Attendees\n"
+        "- Key Points\n"
+        "- Decisions\n"
+        "- Action Items\n\n"
+        f"source: {event.source}\n"
+        f"subscription_id: {event.subscription_id}\n"
+        f"event_type: {event.event_type}\n"
+        f"thread_key: {event.thread_key}\n"
+        f"transcript_filename: {filename}\n\n"
+        f"transcript:\n{transcript}"
+    )
+
+
+def _answer_text_from_stream_chunk(chunk: str) -> Optional[str]:
+    if "event: Answer" not in chunk or "data: " not in chunk:
+        return None
+
+    data = chunk.split("data: ", 1)[1].rsplit("\n\n", 1)[0]
+    try:
+        parsed = json.loads(data)
+    except Exception:
+        return data.strip()
+
+    if isinstance(parsed, dict):
+        answer = parsed.get("data", parsed)
+        if isinstance(answer, str):
+            return answer.strip()
+        return json.dumps(answer, indent=2, sort_keys=True)
+
+    if isinstance(parsed, str):
+        return parsed.strip()
+    return json.dumps(parsed, indent=2, sort_keys=True)
+
+
+async def _run_cuga_event_for_answer(event: CugaEvent, query: str) -> str:
+    answer: Optional[str] = None
+    async for chunk in event_stream(
+        query,
+        api_mode=True,
+        thread_id=event.thread_key,
+        disable_history=True,
+        user_id=f"event:{event.source}",
+    ):
+        extracted = _answer_text_from_stream_chunk(chunk)
+        if extracted:
+            answer = extracted
+
+    if not answer:
+        raise HTTPException(status_code=502, detail="CUGA did not return a summary")
+    return answer
+
+
 async def _dispatch_cuga_event(event: CugaEvent, *, disable_history: bool = False) -> None:
     query = _event_to_query(event)
     try:
@@ -2138,6 +2300,53 @@ async def receive_event(request: Request, event: CugaEvent):
             "idempotency_key": event.idempotency_key,
             "thread_id": event.thread_key,
         },
+    )
+
+
+@app.post("/events/meeting-summary", response_model=CugaMeetingSummaryResponse)
+async def summarize_meeting_event(request: Request, event: CugaEvent):
+    """Synchronous event endpoint used by automation flows that need a CUGA-produced meeting summary."""
+    _require_events_token(request)
+    filename, transcript = _meeting_transcript_from_event(event)
+
+    if event.idempotency_key in app_state.event_idempotency_keys:
+        summary = _summarize_transcript_for_smoke(filename, transcript)
+        return CugaMeetingSummaryResponse(
+            status="accepted",
+            duplicate=True,
+            dispatched=False,
+            idempotency_key=event.idempotency_key,
+            thread_id=event.thread_key,
+            summary=summary,
+        )
+
+    dispatch_enabled = _event_dispatch_enabled()
+    if dispatch_enabled and (not app_state.agent or not app_state.agent.graph):
+        raise HTTPException(status_code=503, detail="CUGA agent is not available")
+
+    if dispatch_enabled:
+        query = _event_to_meeting_summary_query(event, filename, transcript)
+        summary = await _run_cuga_event_for_answer(event, query)
+    else:
+        summary = _summarize_transcript_for_smoke(filename, transcript)
+
+    app_state.event_idempotency_keys.add(event.idempotency_key)
+    logger.info(
+        "Summarized meeting event from {} subscription={} type={} thread={} dispatched={}",
+        event.source,
+        event.subscription_id,
+        event.event_type,
+        event.thread_key,
+        dispatch_enabled,
+    )
+
+    return CugaMeetingSummaryResponse(
+        status="accepted",
+        duplicate=False,
+        dispatched=dispatch_enabled,
+        idempotency_key=event.idempotency_key,
+        thread_id=event.thread_key,
+        summary=summary,
     )
 
 

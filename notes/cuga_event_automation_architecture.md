@@ -418,3 +418,50 @@ CUGA_EVENTS_TOKEN=dev-smoke-token \
 ```
 
 This smoke test intentionally depends on a real CUGA `/events` endpoint. Until that endpoint exists, the Kestra execution should fail with an HTTP error, which is the correct signal that the event ingress slice is not implemented yet.
+
+## File-Driven Meeting Summary Smoke Test
+
+The repo also includes a higher-level smoke test for a real external file handoff. Kestra runs a scheduled file poller over a mounted inbox, processes any new transcript file it finds, and writes the CUGA summary to a mounted outbox.
+
+```bash
+dotenv -e .env -- ./scripts/smoke_kestra_file_to_cuga_summary.sh --start-kestra --no-cleanup
+```
+
+What it does:
+
+1. Starts a dedicated Kestra Docker container on port `8081`.
+2. Mounts a host smoke directory into the Kestra container.
+3. Deploys `deployment/kestra/cuga_file_summary_smoke.yaml`.
+4. Writes a sample meeting transcript into the mounted `inbox`.
+5. Lets Kestra's scheduled file poller detect the new transcript.
+6. Calls CUGA's synchronous `POST /events/meeting-summary` endpoint.
+7. Writes CUGA's returned markdown summary into the mounted `outbox`.
+8. Moves the consumed transcript into the mounted `processed` directory.
+
+For Rancher Desktop on macOS, the `.env` CUGA URL should usually use the host alias that containers can reach:
+
+```bash
+CUGA_EVENTS_URL=http://host.rancher-desktop.internal:7860/events
+```
+
+The script derives `CUGA_MEETING_SUMMARY_URL` from `CUGA_EVENTS_URL` unless it is set explicitly.
+
+The meeting-summary endpoint uses the same normalized event envelope:
+
+```json
+{
+  "source": "kestra",
+  "subscription_id": "sub_smoke_file_to_cuga_summary",
+  "event_type": "file.meeting_transcript.created",
+  "idempotency_key": "kestra:cuga_file_summary_smoke:{{ execution.id }}:transcript.txt",
+  "target_agent": "cuga-default",
+  "thread_key": "file-summary:{{ execution.id }}:transcript",
+  "payload": {
+    "transcript_filename": "transcript.txt",
+    "transcript_path": "/data/cuga-file-summary-smoke/inbox/transcript.txt",
+    "transcript_text": "..."
+  }
+}
+```
+
+For smoke runs, `CUGA_EVENTS_DISPATCH=false` keeps this deterministic and avoids an LLM call. With dispatch enabled, CUGA can route the transcript through the agent and return the final answer as the summary.
