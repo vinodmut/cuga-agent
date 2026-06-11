@@ -1,5 +1,7 @@
 # Event-Driven CUGA Architecture Notes
 
+See also: [CUGA Event Automation Architecture Diagram](cuga_event_automation_architecture_diagram.md).
+
 ## Question
 
 CUGA needs event-driven capabilities: schedules, polling, webhooks, SaaS events, and invocation of CUGA agents. The MVP proposal currently describes a single CUGA daemon that owns cron, pull, push, dispatch, per-agent inboxes, and invocation.
