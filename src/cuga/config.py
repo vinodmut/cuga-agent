@@ -289,6 +289,26 @@ if _configured_sandbox_mode == "native" and platform != "darwin":
     )
     os.environ["DYNACONF_ADVANCED_FEATURES__SANDBOX_MODE"] = "local"
 
+# Pick the model profile from whichever API key is present, so a first run only
+# needs a key — not also AGENT_SETTING_CONFIG and MODEL_NAME. Runs after the
+# .env load above so a key from either the process env or a .env file is seen.
+# An explicit AGENT_SETTING_CONFIG always wins; this only fills the default.
+if not os.environ.get("AGENT_SETTING_CONFIG"):
+    if os.environ.get("LITELLM_API_KEY"):
+        os.environ["AGENT_SETTING_CONFIG"] = "settings.litellm.toml"
+        # The litellm platform reads its key from OPENAI_API_KEY (see
+        # _create_llm_instance in backend/llm/models.py), so bridge it. Override,
+        # not setdefault: setting LITELLM_API_KEY is an explicit "use this key".
+        os.environ["OPENAI_API_KEY"] = os.environ["LITELLM_API_KEY"]
+        os.environ.setdefault("MODEL_NAME", "Azure/gpt-4.1")
+        # Prototype convenience: hardcode the proxy endpoint so a first run needs
+        # only LITELLM_API_KEY. setdefault keeps an explicit OPENAI_BASE_URL /
+        # LITELLM_API_BASE override working. (models.py reads OPENAI_BASE_URL
+        # first, then LITELLM_API_BASE, so set the former.)
+        os.environ.setdefault("OPENAI_BASE_URL", "https://ete-litellm.ai-models.vpc-int.res.ibm.com/v1")
+    elif os.environ.get("OPENAI_API_KEY"):
+        os.environ["AGENT_SETTING_CONFIG"] = "settings.openai.toml"
+
 # Read and sanitize the model settings filename (Windows users sometimes include quotes)
 default_llm = os.environ.get("AGENT_SETTING_CONFIG", "settings.openai.toml")
 # Remove inline comments (everything after #) and strip quotes/whitespace
