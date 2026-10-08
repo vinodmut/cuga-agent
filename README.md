@@ -152,6 +152,23 @@ Experience CUGA's hybrid capabilities by combining API calls with web interactio
 
 </details>
 
+Nothing to clone or install — one command starts the demo:
+
+```bash
+OPENAI_API_KEY=your-openai-api-key-here uvx cuga
+```
+
+CUGA starts the CRM demo and opens your browser at http://localhost:7860. Try
+sending it a task: `from contacts.txt show me which users belong to the crm system`.
+
+Press Ctrl+C to stop. Add `-v` if you want to watch what it is doing, and run
+`uvx cuga --help` for the other services (`cuga start demo_crm` adds the email
+sink and email MCP server).
+
+### Working from a clone
+
+Contributors, or anyone who wants to modify CUGA:
+
 ```bash
 # In terminal, clone the repository and navigate into it
 git clone https://github.com/cuga-project/cuga-agent.git
@@ -168,10 +185,7 @@ uv sync
 echo "OPENAI_API_KEY=your-openai-api-key-here" > .env
 
 # 4. Start the demo
-cuga start demo_crm --read-only
-
-# Chrome will open automatically at https://localhost:7860
-# then try sending your task to CUGA: 'from contacts.txt show me which users belong to the crm system'
+cuga
 
 # 5. View agent trajectories (optional)
 cuga viz

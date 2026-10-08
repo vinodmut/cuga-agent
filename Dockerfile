@@ -44,5 +44,7 @@ ENV CUGA_HOST=0.0.0.0
 # Override the demo port to match HF Spaces
 ENV DYNACONF_SERVER_PORTS__DEMO=7860
 
-# Start the demo_crm service with read-only filesystem and no email services
+# Start the demo_crm service (full preset: CRM, email sink, email MCP, filesystem).
+# Deliberately NOT bare `cuga`: that path opens a browser and redirects service
+# output to log files, which hides it from the container log stream.
 CMD ["uv", "run", "cuga", "start", "demo_crm", "--cuga-workspace", "/app/cuga_workspace"]

@@ -1,6 +1,6 @@
 # Run CUGA with LiteLLM using `uvx`
 
-This example passes all LiteLLM settings on the `uvx` command line. It was verified with the PyPI release `cuga==0.3.2` and the proxy model `Azure/gpt-4.1` on 2026-10-08.
+This example passes all LiteLLM settings on the `uvx` command line. It was verified with the proxy model `Azure/gpt-4.1` on 2026-10-08.
 
 ## Start the CRM demo
 
@@ -13,10 +13,12 @@ OPENAI_API_KEY='YOUR_LITELLM_KEY' \
 OPENAI_BASE_URL='https://YOUR_LITELLM_HOST/v1' \
 AGENT_SETTING_CONFIG=settings.openai.toml \
 MODEL_NAME=Azure/gpt-4.1 \
-uvx --python 3.12 --from cuga==0.3.2 cuga start demo_crm --read-only --no-email
+uvx cuga
 ```
 
-The inline `OPENAI_BASE_URL` setting makes the managed CRM demo send model requests to LiteLLM. `MODEL_NAME` selects the proxy's exact model ID. The temporary working directory isolates the demo files; `uvx` still uses its normal package cache. The test used `--read-only` for workspace preparation and `--no-email` to disable the email services.
+The inline `OPENAI_BASE_URL` setting makes the managed CRM demo send model requests to LiteLLM. `MODEL_NAME` selects the proxy's exact model ID. The temporary working directory isolates the demo files; `uvx` still uses its normal package cache.
+
+`uvx cuga` with no arguments starts the CRM demo with email services off, which is all this example needs. `uvx cuga start demo_crm` gives you the full preset (email sink, email MCP) and every tuning flag.
 
 ## Verify a CRM task
 

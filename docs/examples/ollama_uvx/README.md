@@ -21,10 +21,12 @@ AGENT_SETTING_CONFIG=settings.ollama.toml \
 OPENAI_API_KEY=ollama \
 OPENAI_BASE_URL=http://127.0.0.1:11434/v1 \
 MODEL_NAME=gpt-oss:20b \
-uvx --python 3.12 --from cuga==0.3.2 cuga start demo_crm --read-only --no-email
+uvx cuga
 ```
 
-`OPENAI_API_KEY=ollama` is a placeholder accepted by the OpenAI client; Ollama ignores it. Keep `OPENAI_BASE_URL` in this command: the managed CRM demo can create an LLM from its saved configuration, and in `0.3.2` that path does not inherit the URL in `settings.ollama.toml`. Without the environment override, the test request went to OpenAI and returned HTTP 401. The `--read-only` flag prepares the demo workspace for read-only use, and `--no-email` disables the email services.
+`OPENAI_API_KEY=ollama` is a placeholder accepted by the OpenAI client; Ollama ignores it. Keep `OPENAI_BASE_URL` in this command: the managed CRM demo can create an LLM from its saved configuration, and in `0.3.2` that path does not inherit the URL in `settings.ollama.toml`. Without the environment override, the test request went to OpenAI and returned HTTP 401.
+
+`uvx cuga` with no arguments starts the CRM demo with email services off, which is all this example needs. `uvx cuga start demo_crm` gives you the full preset (email sink, email MCP) and every tuning flag.
 
 ## Verify a full task
 
