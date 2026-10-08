@@ -12,7 +12,8 @@ from langchain_core.runnables import RunnableLambda
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
 except ImportError:
-    logger.warning("Langchain Google GenAI not installed, using OpenAI instead")
+    # Optional extra; absence is the normal install shape, so don't warn.
+    logger.debug("Langchain Google GenAI not installed, using OpenAI instead")
     ChatGoogleGenerativeAI = None
 
 try:

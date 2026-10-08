@@ -126,7 +126,6 @@ class AppManager:
     def start_filesystem(
         self,
         workspace_path: str,
-        read_only: bool = False,
         use_cache: bool = True,
     ) -> int:
         """No-op: filesystem is no longer an MCP subprocess.

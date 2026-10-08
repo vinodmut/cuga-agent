@@ -220,7 +220,7 @@ def start_crm_stack(class_name: str, mode: str = "default") -> StackHandles:
 
     command = ["uv", "run", "cuga", "start", "demo_crm"]
     if mode in ("hf",):
-        command.extend(["--no-email", "--read-only"])
+        command.extend(["--no-email"])
 
     try:
         demo_proc = subprocess.Popen(

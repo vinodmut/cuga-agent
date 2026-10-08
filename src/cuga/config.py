@@ -273,7 +273,9 @@ logger.info("Running cuga in *{}* mode".format(base_settings.features.cuga_mode)
 if base_settings.advanced_features.tracker_enabled:
     logger.info("✅ tracker enabled - logs and trajectory data will be saved")
 else:
-    logger.warning("tracker disabled - logs and trajectory data will not be saved")
+    # debug, not warning: an opt-in feature being off is the expected default,
+    # not a problem the user needs told about on every single startup.
+    logger.debug("tracker disabled - logs and trajectory data will not be saved")
 
 # Auto-override sandbox_mode: "native" requires macOS (sandbox-exec); fall back to "local" elsewhere.
 # Does not override if the user has already explicitly set a non-"native" mode via env var.

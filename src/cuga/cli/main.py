@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -20,7 +21,6 @@ from rich.table import Table
 from rich.text import Text
 
 from cuga.config import PACKAGE_ROOT, TRAJECTORY_DATA_DIR, get_user_data_path, settings
-from cuga.configurations.instructions_manager import InstructionsManager
 from cuga.backend.cuga_graph.policy.cli import app as policy_app
 from cuga.cli.purge_cmds import purge_app
 from cuga.backend.server.demo_manage_setup import (
@@ -31,8 +31,6 @@ from cuga.backend.server.demo_manage_setup import (
 from cuga.backend.server.managed_mcp import ensure_managed_mcp_file_exists, get_managed_mcp_path
 from cuga.cli.app_manager import AppManager
 from cuga.cli.knowledge_cmds import knowledge_app
-
-instructions_manager = InstructionsManager()
 
 
 def _build_workspace_policies(workspace_abs: str, include_email: bool = False) -> str:
@@ -55,11 +53,26 @@ def _demo_port() -> int:
     return int(os.environ.get("DYNACONF_SERVER_PORTS__DEMO", str(settings.server_ports.demo)))
 
 
-def _make_app_manager() -> AppManager:
+def _service_log_dir() -> str:
+    """Where child-service output goes when the terminal is kept clean."""
+    return os.path.join(os.getcwd(), "logging", "services")
+
+
+def _make_app_manager(log_dir: str | None = None) -> AppManager:
+    """Build the app manager.
+
+    ``log_dir`` sends every child service's stdout/stderr to a file under that
+    directory instead of the terminal. Used by bare ``cuga``, where uvicorn's
+    stdlib access logs would otherwise bury the one line the user needs. Note
+    this hides child tracebacks, so callers that pass it must surface the log
+    path when a service fails to come up.
+    """
     sp = settings.server_ports
     return AppManager(
         process_registry=direct_processes,
-        run_service=lambda n, c, e: run_direct_service(n, c, env_vars=e),
+        run_service=lambda n, c, e: run_direct_service(
+            n, c, env_vars=e, log_file=os.path.join(log_dir, f"{n}.log") if log_dir else None
+        ),
         kill_ports=kill_processes_by_port,
         kill_process=kill_process_tree,
         wait_tcp=lambda p, lbl, r, i: wait_for_tcp_port(p, lbl, max_retries=r, retry_interval=i),
@@ -182,7 +195,9 @@ console = Console()
 os.environ["DYNACONF_ADVANCED_FEATURES__TRACKER_ENABLED"] = "true"
 
 app = typer.Typer(
-    help="Cuga CLI for managing services with direct execution",
+    # This string, not the callback docstring, is what `cuga --help` prints as
+    # the summary — so the zero-argument path has to be advertised here.
+    help="Run `cuga` with no arguments to start the demo. Subcommands manage individual services.",
     short_help="Service management tool for Cuga components",
 )
 
@@ -620,14 +635,17 @@ def wait_for_direct_processes():
         stop_direct_processes()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def callback(
+    ctx: typer.Context,
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose output with detailed logging information"
     ),
 ):
     """
     Cuga CLI: A management tool for Cuga services with direct execution.
+
+    Run `cuga` with no arguments to start the demo.
 
     This tool helps you control various components of the Cuga ecosystem:
 
@@ -640,6 +658,7 @@ def callback(
     - registry: The MCP registry service only (runs directly)
     - appworld: AppWorld environment and API servers (runs directly)
     Examples:
+      cuga                      # Start the demo (no arguments needed)
       cuga start demo           # Start both registry and demo agent directly
       cuga start demo_skills    # Skills + OpenSandbox shell tools; stops if sandbox server is unreachable
       cuga start demo_crm       # Start CRM demo with all required services
@@ -648,29 +667,41 @@ def callback(
       cuga start registry       # Start registry only
       cuga start appworld       # Start AppWorld servers
     """
+    # The stderr sink is installed in cuga/cli/__init__.py, which already honours
+    # -v/--verbose via an argv pre-scan. Re-add here anyway so programmatic
+    # callers that invoke the Typer app directly (bypassing the console script)
+    # still get DEBUG. Note the old `logger.level("DEBUG")` was a no-op: that
+    # single-argument form is loguru's *getter*.
     if verbose:
-        logger.level("DEBUG")
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG")
 
     # Set up signal handler for graceful shutdown of direct processes
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Bare `cuga` is the zero-ceremony first run: start the demo.
+    if ctx.invoked_subcommand is None:
+        _run_simple_demo(host="127.0.0.1", cuga_workspace=None)
+
 
 def _start_demo_crm_services(
     host: str,
     sandbox: bool,
-    read_only: bool,
     sample_memory_data: bool,
     no_email: bool,
     enable_supervisor: bool = False,
     tools: list | None = None,
     cuga_workspace: str | None = None,
     filesystem: bool = True,
+    simple_banner: bool = False,
 ):
     """Shared startup logic for demo_crm and demo_supervisor services.
 
     Args:
         enable_supervisor: If True, enables CugaSupervisor multi-agent coordination.
+        simple_banner: If True, print a one-line "running" message and open a
+            browser instead of the full service table. Used by bare ``cuga``.
     """
     service_label = "Supervisor Demo" if enable_supervisor else "CRM Demo"
 
@@ -698,7 +729,7 @@ def _start_demo_crm_services(
         workspace_path = cuga_workspace or os.path.join(os.getcwd(), "cuga_workspace")
         workspace_abs = os.path.abspath(workspace_path)
         os.environ["CUGA_THREAD_WORKSPACE_SEED"] = "crm"
-        app_mgr = _make_app_manager()
+        app_mgr = _make_app_manager(log_dir=_service_log_dir() if simple_banner else None)
         app_mgr.prepare_workspace(workspace_path)
         if sample_memory_data:
             logger.info("📝 Generating sample CRM workspace files...")
@@ -746,16 +777,22 @@ def _start_demo_crm_services(
         registry_process = app_mgr.start_registry(host)
         if registry_process is None or registry_process.poll() is not None:
             logger.error("Registry service failed to start. Exiting.")
+            _report_service_failure("registry", simple_banner)
             stop_direct_processes()
             raise typer.Exit(1)
 
         demo_process = app_mgr.start_demo(host, sandbox=sandbox)
         if demo_process is None or demo_process.poll() is not None:
             logger.error("Demo service failed to start. Exiting.")
+            _report_service_failure("demo", simple_banner)
             stop_direct_processes()
             raise typer.Exit(1)
 
-        if direct_processes:
+        if direct_processes and simple_banner:
+            _print_simple_banner()
+            wait_for_direct_processes()
+
+        elif direct_processes:
             workspace_abs_path = os.path.abspath(workspace_path)
 
             services_table = Table(show_header=False, box=None, padding=(0, 1))
@@ -808,8 +845,96 @@ def _start_demo_crm_services(
 
     except Exception as e:
         logger.error(f"Error starting {service_label} services: {e}")
+        # start_demo/start_registry raise on readiness timeout rather than
+        # returning a dead process, so this handler — not the poll() checks
+        # above — is the common failure route. It must surface the log too.
+        _report_service_failure("demo", simple_banner)
         stop_direct_processes()
         raise typer.Exit(1)
+
+
+def _report_service_failure(service_name: str, simple_banner: bool) -> None:
+    """Point at the log when a child dies with its output redirected.
+
+    Without this, bare ``cuga`` would fail silently: the child's traceback (a
+    missing OPENAI_API_KEY, say) lands in a file nobody was told about.
+    """
+    if not simple_banner:
+        return
+
+    log_path = os.path.join(_service_log_dir(), f"{service_name}.log")
+    console.print()
+    console.print(f"  [bold red]CUGA could not start.[/bold red] Last lines of {log_path}:")
+    console.print()
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            tail = fh.read().splitlines()[-15:]
+        for line in tail:
+            console.print(f"    [dim]{line}[/dim]", highlight=False)
+    except OSError as e:
+        console.print(f"    [dim]could not read the log: {e}[/dim]")
+    console.print()
+
+
+def _print_simple_banner() -> None:
+    """The whole first-run payoff: one URL, and the browser already opening.
+
+    Deliberately omits ports, service inventory and workspace paths — those are
+    still one ``cuga start demo_crm`` away for anyone who wants them.
+    """
+    scheme = "https" if _demo_uses_ssl() else "http"
+    url = f"{scheme}://localhost:{_demo_port()}"
+
+    console.print()
+    console.print(f"  [bold green]CUGA is running[/bold green] → [bold cyan]{url}[/bold cyan]")
+
+    # Never let a headless/locked-down box turn a working demo into a traceback.
+    try:
+        opened = webbrowser.open(url)
+    except Exception as e:  # pragma: no cover - platform dependent
+        logger.debug(f"Could not open a browser: {e}")
+        opened = False
+    console.print("  [dim]Opening your browser…[/dim]" if opened else "  [dim]Open that URL to begin.[/dim]")
+
+    console.print()
+    console.print("  [dim]Ctrl+C to stop[/dim]")
+    console.print()
+
+
+def _run_simple_demo(host: str, cuga_workspace: str | None) -> None:
+    """Back bare ``cuga``: the CRM demo, no email, no flags, no questions.
+
+    A thin wrapper over the same helpers ``cuga start demo_crm`` uses, so the
+    two paths cannot drift.
+    """
+    app_crm, app_email, app_digital_sales, app_docs, app_filesystem, app_oak_health = _resolve_apps(
+        "demo_crm",
+        crm=False,
+        email=False,
+        digital_sales=False,
+        docs=False,
+        filesystem=False,
+        no_email=True,
+        oak_health=False,
+    )
+    _start_demo_crm_services(
+        host=host,
+        sandbox=False,
+        sample_memory_data=False,
+        no_email=True,
+        enable_supervisor=False,
+        tools=build_tools_from_apps(
+            crm=app_crm,
+            email=app_email,
+            digital_sales=app_digital_sales,
+            docs=app_docs,
+            filesystem=app_filesystem,
+            oak_health=app_oak_health,
+        ),
+        cuga_workspace=cuga_workspace,
+        filesystem=app_filesystem,
+        simple_banner=True,
+    )
 
 
 # Helper function to validate service
@@ -872,11 +997,6 @@ def start(
         False,
         "--sandbox",
         help="Enable remote sandbox mode with llm-sandbox (requires --group sandbox to be installed)",
-    ),
-    read_only: bool = typer.Option(
-        False,
-        "--read-only",
-        help="For demo_crm: prepare workspace in read-only context",
     ),
     sample_memory_data: bool = typer.Option(
         False,
@@ -1124,6 +1244,7 @@ def start(
       - demo_health: default = oak_health only
 
     Examples:
+      cuga                                # the demo, no arguments (crm, no email)
       cuga start demo                     # registry + demo; digital_sales + filesystem tools
       cuga start demo_skills              # skills + OpenSandbox shell tools; aborts if unreachable
       cuga start demo --crm               # add CRM to demo
@@ -1691,7 +1812,6 @@ def start(
         _start_demo_crm_services(
             host=host,
             sandbox=sandbox,
-            read_only=read_only,
             sample_memory_data=sample_memory_data,
             no_email=no_email,
             enable_supervisor=(service == "demo_supervisor"),

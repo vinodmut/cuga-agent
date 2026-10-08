@@ -26,7 +26,8 @@ try:
     from agent_analytics_core.interfaces.annotations import DataAnnotation
 except Exception:
     AGENT_ANALYTICS = False
-    logger.warning("Ignoring agent analytics")
+    # Optional extra; absence is the normal install shape, so don't warn.
+    logger.debug("Ignoring agent analytics")
 
 
 class MergeResult(BaseModel):

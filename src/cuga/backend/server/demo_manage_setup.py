@@ -150,7 +150,9 @@ def load_cuga_policy_entries_for_demo(cuga_folder: str | None = None) -> list[di
 
     root = Path(cuga_folder or os.getenv("CUGA_FOLDER", settings.policy.cuga_folder))
     if not root.exists():
-        logger.warning(
+        # debug, not warning: a fresh working directory has no .cuga folder, so
+        # this is the normal first-run path rather than something to report.
+        logger.debug(
             "Demo policy preload: .cuga folder not found at %s; skipping local policy import",
             root,
         )
