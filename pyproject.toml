@@ -73,19 +73,10 @@ dependencies = [
     "cryptography>=50.0.0",
     "hvac>=2.0.0",
     "boto3>=1.34.0",
-    # Knowledge engine (replaces OpenRAG)
-    "langchain-docling>=2.0,<3.0",
-    # EasyOCR is the cross-platform safety net so OCR Just Works on a
-    # fresh ``uv sync`` even when tesseract isn't on PATH. Tesseract
-    # (system binary) is preferred when available — see
-    # ``engine._select_ocr_engine_options``. Test
-    # ``test_no_tesseract_falls_back_to_easyocr`` documents that this
-    # fallback path must remain importable.
-    "easyocr",
-    # explicit: forces pytorch-cpu index via [tool.uv.sources], avoids 3.5GB nvidia-cuda wheels.
-    # 2.13.0 fixes GHSA-rrmf-rvhw-rf47 (memory corruption in torch.jit.script, <=2.12.1).
-    "torch>=2.13.0",
-    "torchvision", # explicit: must match torch variant (cpu) to avoid operator registration errors
+    # Knowledge engine's document-ingestion stack (langchain-docling, easyocr,
+    # torch, torchvision) lives in the optional ``knowledge`` extra below — it is
+    # the only part of CUGA that needs PyTorch, and PyTorch has no macOS-Intel
+    # wheels, so keeping it out of core lets ``uvx cuga`` install everywhere.
     "langchain-ollama>=0.2.0",
     "langchain-text-splitters>=1.0,<2.0",
     "beautifulsoup4>=4.12",
@@ -101,7 +92,20 @@ dependencies = [
 acp = ["agent-client-protocol>=0.12.1,<0.13"]
 evaluation = ["rapidfuzz"]
 e2b = ["e2b-code-interpreter>=2.4.1"]
-knowledge = []  # knowledge is now built-in, no extra dependencies needed
+# Document-ingestion stack for the knowledge (RAG) engine. Optional because it
+# pulls PyTorch (via docling + easyocr), which has no macOS-Intel wheels and is
+# a multi-hundred-MB download. Without it, CUGA still runs the agent, the CRM
+# demo, and retrieval against an existing index; only ingesting new documents
+# needs it, and that path raises a clear "install cuga[knowledge]" message
+# (see _import_docling_loader in backend/knowledge/engine.py). torch/torchvision
+# resolve from the CPU-only index (see [tool.uv.sources]) to avoid CUDA wheels.
+# 2.13.0 fixes GHSA-rrmf-rvhw-rf47 (torch.jit.script memory corruption, <=2.12.1).
+knowledge = [
+    "langchain-docling>=2.0,<3.0",
+    "easyocr",
+    "torch>=2.13.0",
+    "torchvision",
+]
 health = ["cuga-oak-health; python_version>='3.12'"]  # kept for backward compat, now also in core deps
 opensandbox = ["opensandbox", "opensandbox-code-interpreter"]
 # Evolve 1.3 adds source-deletion grace periods, durable retries, and filter display metadata.

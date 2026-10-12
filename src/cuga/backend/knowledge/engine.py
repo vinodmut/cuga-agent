@@ -28,7 +28,6 @@ from pydantic import ConfigDict
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.indexing import InMemoryRecordManager
-from langchain_docling import DoclingLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from cuga.backend.knowledge.config import (
@@ -164,6 +163,26 @@ def _iter_exception_messages(exc: BaseException) -> list[str]:
             stack.append(current.__context__)
 
     return messages
+
+
+def _import_docling_loader():
+    """Import langchain_docling lazily, so the module only needs the optional
+    knowledge stack (torch, docling, …) when a document is actually ingested.
+
+    Keeping this out of module scope is what lets ``cuga`` install and boot
+    without PyTorch (see the ``knowledge`` extra in pyproject.toml). Document
+    ingestion is the only path that needs it; everything else — the agent, the
+    CRM demo, retrieval against an already-built index — does not.
+    """
+    try:
+        from langchain_docling import DoclingLoader
+        from langchain_docling.loader import ExportType
+    except ImportError as e:
+        raise ModuleNotFoundError(
+            "Document ingestion requires the optional knowledge stack "
+            "(docling, torch). Install it with:  pip install 'cuga[knowledge]'"
+        ) from e
+    return DoclingLoader, ExportType
 
 
 def _translate_document_load_error(file_path: Path, exc: BaseException) -> Exception:
@@ -5318,9 +5337,10 @@ class KnowledgeEngine:
         chunk_size, chunk_overlap = self._get_effective_chunk_settings()
 
         if suffix in self._DOCLING_FORMATS:
+            # Resolve before the try so a missing knowledge stack surfaces its
+            # own clear message instead of being masked as a parse error.
+            DoclingLoader, ExportType = _import_docling_loader()
             try:
-                from langchain_docling.loader import ExportType
-
                 chunker = self._build_docling_chunker(chunk_size)
                 loader_kwargs: dict = {
                     "file_path": str(file_path),
@@ -5359,9 +5379,8 @@ class KnowledgeEngine:
             chunks = splitter.split_text(text)
             docs = [Document(page_content=chunk, metadata={"page": i + 1}) for i, chunk in enumerate(chunks)]
         else:
+            DoclingLoader, ExportType = _import_docling_loader()
             try:
-                from langchain_docling.loader import ExportType
-
                 chunker = self._build_docling_chunker(chunk_size)
                 loader_kwargs = {
                     "file_path": str(file_path),
